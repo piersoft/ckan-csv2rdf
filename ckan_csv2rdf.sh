@@ -196,6 +196,62 @@ upload_ttl_to_ckan() {
 }
 
 # ---------------------------------------------------------------------------
+# Funzione: corregge license_id del dataset se è una stringa descrittiva
+# invece di uno slug CKAN valido (causa crash di ckanext-dcatapit su .ttl)
+# DCAT-AP_IT mette la licenza sulla Distribution, non sul Dataset, ma alcuni
+# portali harvested importano il titolo per esteso invece dello slug.
+# ---------------------------------------------------------------------------
+fix_dataset_license_if_needed() {
+    local dataset_id="$1"
+    local ds_json="$2"
+
+    local license_url
+    license_url=$(echo "$ds_json" | jq -r '.result.license_url // ""')
+
+    # Se license_url è valorizzato, non c'è nulla da fare
+    [[ -n "$license_url" ]] && return 0
+
+    # license_url è None/vuoto — tentiamo di mappare license_id allo slug corretto
+    local license_id
+    license_id=$(echo "$ds_json" | jq -r '.result.license_id // ""')
+    [[ -z "$license_id" ]] && return 0
+
+    local new_slug=""
+    case "${license_id,,}" in
+        *"cc by 4.0"*|*"attribuzione 4"*|*"ccby40"*|*"cc-by 4"*) new_slug="cc-by" ;;
+        *"cc by-sa"*|*"condividi allo"*) new_slug="cc-by-sa" ;;
+        *"cc zero"*|*"cc0"*|*"public domain"*|*"dominio pubblico"*) new_slug="cc-zero" ;;
+        *"odbl"*|*"open database"*) new_slug="odc-odbl" ;;
+        *"odc-by"*|*"odc by"*) new_slug="odc-by" ;;
+        *"pddl"*) new_slug="odc-pddl" ;;
+        *"italian open data"*|*"iodl"*) new_slug="cc-by" ;;
+    esac
+
+    if [[ -z "$new_slug" ]]; then
+        log "  [WARN] license_id non mappabile a slug CKAN: '$license_id' — dataset potrebbe non serializzare in TTL"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "  [DRY-RUN] Correggerei license_id: '$license_id' → '$new_slug'"
+        return 0
+    fi
+
+    local resp
+    resp=$(curl -s -X POST "${CKAN_URL}/api/3/action/package_patch"         -H "Authorization: ${CKAN_API_KEY}"         -H "Content-Type: application/json"         -d "{"id": "${dataset_id}", "license_id": "${new_slug}"}")
+
+    local ok
+    ok=$(echo "$resp" | jq -r '.success // "false"' 2>/dev/null || echo "false")
+    if [[ "$ok" == "true" ]]; then
+        log "  [FIX] license_id corretto: '${license_id}' → '${new_slug}' (license_url ora valorizzato)"
+    else
+        local err
+        err=$(echo "$resp" | jq -r '.error | to_entries | map("\(.key): \(.value)") | join(", ")' 2>/dev/null || echo "$resp")
+        log "  [WARN] Impossibile correggere license_id: $err"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Funzione: restituisce lista dataset dell'organizzazione (JSON array di ID)
 # ---------------------------------------------------------------------------
 get_org_datasets() {
@@ -256,6 +312,10 @@ for ds_id in "${DATASET_IDS[@]}"; do
         jq -r '.result.resources[] | select(.format=="CSV" or (.url | test("\\.csv(\\?.*)?$";"i"))) | @base64')
 
     [[ ${#CSV_RESOURCES[@]} -eq 0 ]] && continue
+
+    # Correggi license_id se è stringa descrittiva invece di slug CKAN
+    # (previene crash ckanext-dcatapit su serializzazione .ttl del dataset)
+    fix_dataset_license_if_needed "$ds_id" "$ds_json"
 
     # Leggi titolare dai campi DCAT-AP_IT del dataset; fallback su org o config
     ds_holder_name=$(echo "$ds_json" | jq -r '.result.holder_name // empty' 2>/dev/null || true)
