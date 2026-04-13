@@ -238,7 +238,9 @@ fix_dataset_license_if_needed() {
     fi
 
     local resp
-    resp=$(curl -s -X POST "${CKAN_URL}/api/3/action/package_patch"         -H "Authorization: ${CKAN_API_KEY}"         -H "Content-Type: application/json"         -d "{"id": "${dataset_id}", "license_id": "${new_slug}"}")
+    local payload
+    payload=$(python3 -c "import json,sys; print(json.dumps({'id':sys.argv[1],'license_id':sys.argv[2]}))" "$dataset_id" "$new_slug")
+    resp=$(curl -s -X POST "${CKAN_URL}/api/3/action/package_patch"         -H "Authorization: ${CKAN_API_KEY}"         -H "Content-Type: application/json"         -d "$payload")
 
     local ok
     ok=$(echo "$resp" | jq -r '.success // "false"' 2>/dev/null || echo "false")
