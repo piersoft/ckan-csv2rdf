@@ -46,3 +46,12 @@ PA_IPA_FALLBACK=""
 
 # File di log (vuoto = solo stdout)
 # LOG_FILE="/var/log/ckan_csv2rdf.log"
+
+# ---------------------------------------------------------------------------
+# Formati di output aggiuntivi (TTL è sempre incluso)
+# ---------------------------------------------------------------------------
+
+# Genera e carica anche una risorsa RDF/XML (W3C) per ogni CSV convertito.
+# Il worker viene chiamato una seconda volta con fmt=rdf.
+# Se la risorsa RDF/XML esiste già nel dataset, viene aggiornata (PATCH/upload).
+# RDF_XML=false

@@ -33,6 +33,8 @@ SLEEP_BETWEEN=1
 DRY_RUN="false"
 # Log file (vuoto = solo stdout)
 LOG_FILE=""
+# Genera e carica anche RDF/XML oltre al TTL (default: false)
+RDF_XML="false"
 
 # ---------------------------------------------------------------------------
 # Carica config
@@ -279,6 +281,124 @@ get_dataset() {
 }
 
 # ---------------------------------------------------------------------------
+# Funzione: chiama l'API CSV-to-RDF con fmt=rdf e salva il file RDF/XML
+# $1 = URL del CSV
+# $2 = holder_name
+# $3 = holder_identifier
+# $4 = percorso file di output (.rdf)
+# ---------------------------------------------------------------------------
+convert_csv_to_rdf() {
+    local csv_url="$1"
+    local pa_name="$2"
+    local pa_ipa="$3"
+    local out_file="$4"
+
+    local enc_csv enc_pa
+    enc_csv=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$csv_url")
+    enc_pa=$(python3  -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1],safe=''))" "$pa_name")
+
+    local api_url="${CSV2RDF_API}?url=${enc_csv}&ipa=${pa_ipa}&pa=${enc_pa}&fmt=rdf"
+
+    local http_code
+    http_code=$(curl -s -w "%{http_code}" \
+        --max-time 300 \
+        -o "$out_file" \
+        "$api_url")
+
+    if [[ "$http_code" != "200" ]]; then
+        echo "__ERROR__:HTTP $http_code" >&2
+        return 1
+    fi
+
+    # Verifica che il file sia RDF/XML valido
+    if ! grep -q "<rdf:RDF\|<rdf:Description" "$out_file"; then
+        echo "__ERROR__:risposta non valida dal worker (non è RDF/XML)" >&2
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Funzione: carica un file RDF/XML su CKAN come risorsa
+# $1 = dataset_id
+# $2 = resource_name
+# $3 = file_path (.rdf)
+# $4 = csv_resource_json (base64)
+# $5 = existing_rdf_id (opzionale: ID risorsa da aggiornare)
+# ---------------------------------------------------------------------------
+upload_rdf_to_ckan() {
+    local dataset_id="$1"
+    local resource_name="$2"
+    local file_path="$3"
+    local csv_res_json
+    csv_res_json=$(echo "${4:-}" | base64 --decode)
+    local existing_id="${5:-}"
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log "  [DRY-RUN] Salto upload RDF/XML: $resource_name (dataset: $dataset_id)"
+        return 0
+    fi
+
+    # Eredita metadati licenza/availability dalla risorsa CSV sorgente
+    local lic lic_id lic_type availability rights
+    lic=$(      echo "$csv_res_json" | jq -r '.license      // ""')
+    lic_id=$(   echo "$csv_res_json" | jq -r '.license_id   // ""')
+    lic_type=$( echo "$csv_res_json" | jq -r '.license_type // ""')
+    availability=$(echo "$csv_res_json" | jq -r '.availability // "https://publications.europa.eu/resource/authority/planned-availability/STABLE"')
+    rights=$(      echo "$csv_res_json" | jq -r '.rights       // "http://publications.europa.eu/resource/authority/access-right/PUBLIC"')
+
+    local fmt="RDF_XML"
+    local mime="https://iana.org/assignments/media-types/application/rdf+xml"
+    local desc="Conversione automatica RDF/XML generata da CSV-to-RDF (ontologie dati-semantic-assets / schema.gov.it)"
+
+    local endpoint action resp success
+    if [[ -n "$existing_id" ]]; then
+        endpoint="${CKAN_URL}/api/3/action/resource_update"
+        action="aggiornamento"
+        resp=$(curl -s -X POST "$endpoint" \
+            -H "Authorization: ${CKAN_API_KEY}" \
+            -F "id=${existing_id}" \
+            -F "name=${resource_name}" \
+            -F "format=${fmt}" \
+            -F "distribution_format=${fmt}" \
+            -F "mimetype=${mime}" \
+            -F "description=${desc}" \
+            -F "license=${lic}" \
+            -F "license_id=${lic_id}" \
+            -F "license_type=${lic_type}" \
+            -F "availability=${availability}" \
+            -F "rights=${rights}" \
+            -F "upload=@${file_path};type=application/rdf+xml")
+    else
+        endpoint="${CKAN_URL}/api/3/action/resource_create"
+        action="creazione"
+        resp=$(curl -s -X POST "$endpoint" \
+            -H "Authorization: ${CKAN_API_KEY}" \
+            -F "package_id=${dataset_id}" \
+            -F "name=${resource_name}" \
+            -F "format=${fmt}" \
+            -F "distribution_format=${fmt}" \
+            -F "mimetype=${mime}" \
+            -F "description=${desc}" \
+            -F "license=${lic}" \
+            -F "license_id=${lic_id}" \
+            -F "license_type=${lic_type}" \
+            -F "availability=${availability}" \
+            -F "rights=${rights}" \
+            -F "upload=@${file_path};type=application/rdf+xml")
+    fi
+
+    success=$(echo "$resp" | jq -r '.success // "false"' 2>/dev/null || echo "false")
+    if [[ "$success" == "true" ]]; then
+        log "  [OK] $action risorsa RDF/XML: $resource_name"
+        log "       license: ${lic_id:-N/D} | availability: $availability"
+    else
+        local err
+        err=$(echo "$resp" | jq -r '.error | to_entries | map("\(.key): \(.value)") | join(", ")' 2>/dev/null || echo "$resp")
+        log "  [WARN] $action RDF/XML fallita per: $resource_name — $err"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 log "======================================================"
@@ -380,6 +500,33 @@ for ds_id in "${DATASET_IDS[@]}"; do
                 log "  [WARN] Conversione fallita per: $csv_name"
                 log "         Motivo: $err_msg"
                 CONVERTED_ERR=$((CONVERTED_ERR + 1))
+            fi
+        fi
+
+        # --- RDF/XML opzionale ---
+        if [[ "${RDF_XML:-false}" == "true" ]] && [[ -f "$ttl_file" ]]; then
+            rdf_name="${csv_name} (RDF/XML)"
+            rdf_file="${TMPDIR_WORK}/$(echo "${csv_id}" | tr -d '/-').rdf"
+
+            # Cerca risorsa RDF/XML esistente nel dataset
+            existing_rdf_id=$(echo "$ds_json" | \
+                jq -r --arg rname "$rdf_name" \
+                '.result.resources[] | select(.name == $rname) | .id' | head -1)
+
+            log "       Generazione RDF/XML..."
+            if convert_csv_to_rdf "$csv_url" "$ds_holder_name" "$ds_holder_ipa" "$rdf_file" 2>/tmp/csv2rdf_err.txt; then
+                rdf_size=$(wc -c < "$rdf_file")
+                log "       RDF/XML generato: ${rdf_size} byte"
+                if [[ -n "$existing_rdf_id" ]]; then
+                    upload_rdf_to_ckan "$ds_id" "$rdf_name" "$rdf_file" "$csv_b64" "$existing_rdf_id"
+                    UPLOADED_UPD=$((UPLOADED_UPD + 1))
+                else
+                    upload_rdf_to_ckan "$ds_id" "$rdf_name" "$rdf_file" "$csv_b64"
+                    UPLOADED_NEW=$((UPLOADED_NEW + 1))
+                fi
+            else
+                err_msg=$(cat /tmp/csv2rdf_err.txt 2>/dev/null || echo "errore sconosciuto")
+                log "  [WARN] Generazione RDF/XML fallita per: $csv_name — $err_msg"
             fi
         fi
 
