@@ -84,16 +84,17 @@ for cmd in curl jq; do
 done
 
 # ---------------------------------------------------------------------------
-# Funzione: chiama l'API CSV-to-RDF e restituisce il TTL su stdout
+# Funzione: chiama l'API CSV-to-RDF e salva il TTL direttamente su file
 # $1 = URL del CSV
 # $2 = holder_name (nome PA titolare del dataset)
 # $3 = holder_identifier (codice IPA o CF del titolare)
+# $4 = percorso file di output
 # ---------------------------------------------------------------------------
 convert_csv_to_ttl() {
     local csv_url="$1"
     local pa_name="$2"
     local pa_ipa="$3"
-    local response http_code body
+    local out_file="$4"
 
     # URL-encode dei parametri
     local enc_csv enc_pa
@@ -103,26 +104,21 @@ convert_csv_to_ttl() {
     # Il worker accetta: ?url=…&ipa=<codice_ipa>&pa=<nome_pa>
     local api_url="${CSV2RDF_API}?url=${enc_csv}&ipa=${pa_ipa}&pa=${enc_pa}"
 
-    response=$(curl -s -w "\n__HTTP_CODE__:%{http_code}" \
-        --max-time 120 \
-        "$api_url"
-    )
-
-    http_code=$(echo "$response" | grep -o '__HTTP_CODE__:[0-9]*' | cut -d: -f2)
-    body=$(echo "$response" | sed 's/__HTTP_CODE__:[0-9]*$//')
+    # Scrivi direttamente su file: evita di caricare risposte enormi in memoria
+    # --max-time 300: CSV grandi (>10k righe) possono richiedere più tempo
+    local http_code
+    http_code=$(curl -s -w "%{http_code}"         --max-time 300         -o "$out_file"         "$api_url")
 
     if [[ "$http_code" != "200" ]]; then
         echo "__ERROR__:HTTP $http_code" >&2
         return 1
     fi
 
-    # Controlla che la risposta sembri TTL valido
-    if ! echo "$body" | grep -q "@prefix\|@base\|<http"; then
-        echo "__ERROR__:risposta non sembra TTL valido" >&2
+    # Controlla che il file sembri TTL valido (leggi solo le prime 20 righe)
+    if ! head -20 "$out_file" | grep -q "@prefix\|@base\|<http"; then
+        echo "__ERROR__:risposta non sembra TTL valido (prime righe: $(head -3 "$out_file"))" >&2
         return 1
     fi
-
-    echo "$body"
 }
 
 # ---------------------------------------------------------------------------
@@ -288,7 +284,7 @@ for ds_id in "${DATASET_IDS[@]}"; do
         ttl_file="${TMPDIR_WORK}/$(echo "${csv_id}" | tr -d '/-').ttl"
         log "       Conversione in corso..."
 
-        if convert_csv_to_ttl "$csv_url" "$ds_holder_name" "$ds_holder_ipa" > "$ttl_file" 2>/tmp/csv2rdf_err.txt; then
+        if convert_csv_to_ttl "$csv_url" "$ds_holder_name" "$ds_holder_ipa" "$ttl_file" 2>/tmp/csv2rdf_err.txt; then
             ttl_size=$(wc -c < "$ttl_file")
             log "       TTL generato: ${ttl_size} byte"
             CONVERTED_OK=$((CONVERTED_OK + 1))
