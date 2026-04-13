@@ -114,9 +114,20 @@ convert_csv_to_ttl() {
         return 1
     fi
 
-    # Controlla che il file sembri TTL valido (leggi solo le prime 20 righe)
-    if ! head -20 "$out_file" | grep -q "@prefix\|@base\|<http"; then
-        echo "__ERROR__:risposta non sembra TTL valido (prime righe: $(head -3 "$out_file"))" >&2
+    # Controlla che il file contenga triple TTL valide (non solo commenti)
+    if ! grep -q "^@prefix\|^@base\|^<http" "$out_file"; then
+        # Distingui: ontologia non rilevata (TTL vuoto) vs risposta non valida
+        if grep -q "^# Ontologie:" "$out_file"; then
+            local onto
+            onto=$(grep "^# Ontologie:" "$out_file" | head -1)
+            if [[ "$onto" == "# Ontologie: " || "$onto" == "# Ontologie:" ]]; then
+                echo "__SKIP__:nessuna ontologia rilevata per questo CSV (colonne non mappate)" >&2
+            else
+                echo "__SKIP__:TTL generato senza triple (${onto})" >&2
+            fi
+        else
+            echo "__ERROR__:risposta non valida dal worker (prime righe: $(head -3 "$out_file"))" >&2
+        fi
         return 1
     fi
 }
@@ -225,6 +236,7 @@ trap 'rm -rf "$TMPDIR_WORK"' EXIT
 # Contatori
 TOTAL_CSV=0
 CONVERTED_OK=0
+CONVERTED_SKIP=0
 CONVERTED_ERR=0
 UPLOADED_NEW=0
 UPLOADED_UPD=0
@@ -299,9 +311,14 @@ for ds_id in "${DATASET_IDS[@]}"; do
             fi
         else
             err_msg=$(cat /tmp/csv2rdf_err.txt 2>/dev/null || echo "errore sconosciuto")
-            log "  [WARN] Conversione fallita per: $csv_name"
-            log "         Motivo: $err_msg"
-            CONVERTED_ERR=$((CONVERTED_ERR + 1))
+            if [[ "$err_msg" == __SKIP__* ]]; then
+                log "  [SKIP] $csv_name — ${err_msg#__SKIP__:}"
+                CONVERTED_SKIP=$((CONVERTED_SKIP + 1))
+            else
+                log "  [WARN] Conversione fallita per: $csv_name"
+                log "         Motivo: $err_msg"
+                CONVERTED_ERR=$((CONVERTED_ERR + 1))
+            fi
         fi
 
         sleep "$SLEEP_BETWEEN"
@@ -313,6 +330,7 @@ log "[3/3] Riepilogo"
 log "======================================================"
 log " CSV analizzati:       $TOTAL_CSV"
 log " Conversioni OK:       $CONVERTED_OK"
+log " CSV saltati (non mappati): $CONVERTED_SKIP"
 log " Conversioni fallite:  $CONVERTED_ERR"
 log " Risorse TTL create:   $UPLOADED_NEW"
 log " Risorse TTL aggiornate: $UPLOADED_UPD"
