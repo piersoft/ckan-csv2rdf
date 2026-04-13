@@ -1,0 +1,48 @@
+# =============================================================================
+# ckan_csv2rdf.conf
+# Configurazione per ckan_csv2rdf.sh
+# =============================================================================
+
+# URL base del CKAN (senza trailing slash)
+# Esempio: https://dati.comune.esempio.it
+CKAN_URL="https://dati.mioente.it"
+
+# API key con permessi di scrittura sull'organizzazione
+CKAN_API_KEY="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+# Slug dell'organizzazione CKAN (non il titolo, lo slug nell'URL)
+# Esempio: comune-di-bari, regione-puglia
+CKAN_ORG="nome-organizzazione"
+
+# ---------------------------------------------------------------------------
+# Titolare dei dati — gestione automatica per portali federati
+# ---------------------------------------------------------------------------
+# Su portali con N enti (es. aggregatori regionali), il titolare viene letto
+# automaticamente dai campi DCAT-AP_IT di ogni dataset:
+#   holder_name       → nome PA (es. "Comune di Mesagne")
+#   holder_identifier → codice IPA o CF (es. "c_f152")
+# Se questi campi mancano, lo script usa organization.title come nome.
+#
+# I campi seguenti sono FALLBACK opzionali: usati solo se il dataset
+# non ha né holder_name né organization.title valorizzati.
+PA_NAME_FALLBACK=""
+PA_IPA_FALLBACK=""
+
+# ---------------------------------------------------------------------------
+# Parametri opzionali (i default sono già ragionevoli)
+# ---------------------------------------------------------------------------
+
+# Endpoint del worker CSV-to-RDF (default: API pubblica)
+# CSV2RDF_API="https://csv2rdf.datigovit.workers.dev"
+
+# Secondi di pausa tra una conversione e l'altra (default: 1)
+# SLEEP_BETWEEN=2
+
+# Suffisso aggiunto al nome CSV per la risorsa TTL (default: " (RDF/Turtle)")
+# TTL_NAME_SUFFIX=" (RDF/Turtle)"
+
+# Dry-run: imposta "true" per testare senza scrivere nulla su CKAN
+# DRY_RUN="true"
+
+# File di log (vuoto = solo stdout)
+# LOG_FILE="/var/log/ckan_csv2rdf.log"
